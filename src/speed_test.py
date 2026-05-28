@@ -5,8 +5,7 @@ from config import (
     ECAT_ADAPTER_NAME,
     CONTROLWORD, STATUSWORD, MODE_OP, MODE_OP_DISPLAY,
     TARGET_VELOCITY, VELOCITY_ACTUAL, TORQUE_ACTUAL,
-    PROFILE_ACCEL, PROFILE_DECEL, MAX_MOTOR_SPEED, GEAR_RATIO,
-    ENCODER_COUNTS_PER_REV,
+    PROFILE_ACCEL, PROFILE_DECEL, MAX_MOTOR_SPEED,
     BRAKE_OFF_DELAY, BRAKE_SPEED_LEVEL, BRAKE_ON_DELAY,
     CW_SHUTDOWN, CW_SWITCH_ON, CW_ENABLE_OP, CW_DISABLE_VOLTAGE,
     CW_FAULT_RESET,
@@ -16,6 +15,10 @@ from config import (
     BRAKE_RELEASE_SPEED_RPM, BRAKE_OFF_DELAY_MS, BRAKE_ON_DELAY_MS,
     DEFAULT_ACCEL_RPM, DEFAULT_DECEL_RPM,
 )
+
+# Velocity scaling factor: raw units per RPM (raw = RPM / factor)
+# VELOCITY_FACTOR = 0.000011  # default scaling (raw per RPM = 1000)
+VELOCITY_FACTOR = 0.00000726  # default scaling (raw per RPM = 1000)
 
 
 def find_adapter(desc_hint):
@@ -96,7 +99,7 @@ def state_machine_enable(drive):
 
 
 def configure_brake(drive):
-    print("Configuring brake parameters…")
+    print("Configuring brake parameters...")
     sdo_write(drive, BRAKE_SPEED_LEVEL, struct.pack('H', BRAKE_RELEASE_SPEED_RPM))
     sdo_write(drive, BRAKE_OFF_DELAY, struct.pack('H', BRAKE_OFF_DELAY_MS))
     sdo_write(drive, BRAKE_ON_DELAY, struct.pack('H', BRAKE_ON_DELAY_MS))
@@ -111,45 +114,6 @@ def set_mode(drive, mode):
     actual = struct.unpack('b', sdo_read(drive, MODE_OP_DISPLAY, 1))[0]
     print(f"  Mode set: {mode}, mode display: {actual}")
     return actual == mode
-
-
-def read_gear_ratio(drive):
-    # 0x6091:1 = motor revolutions, 0x6091:2 = shaft revolutions
-    try:
-        motor_revs = struct.unpack('I', drive.sdo_read(GEAR_RATIO, 1, 4))[0]
-        shaft_revs = struct.unpack('I', drive.sdo_read(GEAR_RATIO, 2, 4))[0]
-        if motor_revs == 0 or shaft_revs == 0:
-            raise ValueError("zero in gear ratio")
-        return motor_revs, shaft_revs
-    except Exception as e:
-        print(f"  [WARN] Could not read 0x6091 Gear Ratio ({e}); falling back to 1:1")
-        return 1, 1
-
-
-def compute_raw_per_rpm(drive):
-    motor_revs, shaft_revs = read_gear_ratio(drive)
-    raw_per_rpm = ENCODER_COUNTS_PER_REV * motor_revs / shaft_revs / 60.0
-    print(f"  Encoder: {ENCODER_COUNTS_PER_REV} counts/rev, "
-          f"gear {motor_revs}/{shaft_revs} -> {raw_per_rpm:.3f} raw per RPM")
-    return raw_per_rpm
-
-
-def write_target_velocity(drive, raw_target):
-    """Write 0x60FF and toggle controlword bit 4 to latch the new setpoint on Y7.
-
-    Bit 4 in PV is "Reserved" per CiA 402, but empirically Y7 needs the
-    0x000F → 0x001F → 0x000F transition to latch a new target velocity.
-    Without it the drive keeps using its previous internal setpoint.
-    """
-    sdo_write(drive, TARGET_VELOCITY, struct.pack('i', raw_target))
-    sdo_write(drive, CONTROLWORD, struct.pack('<H', 0x001F))
-    time.sleep(0.05)
-    sdo_write(drive, CONTROLWORD, struct.pack('<H', 0x000F))
-    time.sleep(0.05)
-    readback = struct.unpack('i', sdo_read(drive, TARGET_VELOCITY, 4))[0]
-    if readback != raw_target:
-        print(f"  [WARN] target velocity mismatch: wrote {raw_target}, read {readback}")
-    return readback
 
 
 def read_actual_velocity(drive):
@@ -199,32 +163,25 @@ def main():
             print("Failed to reach Operational state!")
             return
 
-        raw_per_rpm = compute_raw_per_rpm(drive)
+        # Velocity factor will be set after profile parameters (see below)
 
         configure_brake(drive)
 
-        print("Setting Profile Velocity mode before enable…")
+        print("Setting Profile Velocity mode before enable...")
         if not set_mode(drive, MODE_PROFILE_VELOCITY):
             print("Warning: mode may not be set correctly")
-
-        # Safety: clear any stale target velocity left in 0x60FF from a previous
-        # session (other test scripts in this repo do not zero it on exit).
-        # Done BEFORE Servo ON so the motor starts from a known 0 setpoint.
-        sdo_write(drive, TARGET_VELOCITY, struct.pack('i', 0))
-        stale = struct.unpack('i', sdo_read(drive, TARGET_VELOCITY, 4))[0]
-        print(f"  Pre-enable target velocity cleared (read-back: {stale})")
-
         if not state_machine_enable(drive):
             print("Failed to enable drive!")
             return
 
-        print("Setting Profile Velocity mode…")
+        print("Setting Profile Velocity mode...")
         if not set_mode(drive, MODE_PROFILE_VELOCITY):
             print("Warning: mode may not be set correctly")
 
-        accel_raw = int(DEFAULT_ACCEL_RPM * raw_per_rpm)
-        decel_raw = int(DEFAULT_DECEL_RPM * raw_per_rpm)
-        max_speed_raw = int(SPEED_MAX_RPM * raw_per_rpm)
+        # Scale acceleration/velocity parameters to raw units
+        accel_raw = int(DEFAULT_ACCEL_RPM / VELOCITY_FACTOR)
+        decel_raw = int(DEFAULT_DECEL_RPM / VELOCITY_FACTOR)
+        max_speed_raw = int(SPEED_MAX_RPM / VELOCITY_FACTOR)
         sdo_write(drive, PROFILE_ACCEL, struct.pack('I', accel_raw))
         sdo_write(drive, PROFILE_DECEL, struct.pack('I', decel_raw))
         sdo_write(drive, MAX_MOTOR_SPEED, struct.pack('I', max_speed_raw))
@@ -232,6 +189,10 @@ def main():
         print(f"  Decel: {DEFAULT_DECEL_RPM} rpm/s (raw {decel_raw})")
         print(f"  Max speed: {SPEED_MAX_RPM} RPM (raw {max_speed_raw})")
         print("-" * 60)
+        # Set velocity factor (ensure it persists after mode changes)
+        sdo_write(drive, 0x6081, struct.pack('f', VELOCITY_FACTOR))
+        factor_read = struct.unpack('f', sdo_read(drive, 0x6081, 4))[0]
+        print(f"  Velocity factor confirmed: {factor_read}")
         print("Interactive speed control")
         print("  Enter speed in RPM (0-4500), Enter=Stop, Ctrl+C=Exit")
         print("-" * 60)
@@ -241,7 +202,7 @@ def main():
             try:
                 user_input = input(f"\nSpeed [{current_speed}] > ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\nExiting…")
+                print("\nExiting...")
                 break
 
             if user_input == "":
@@ -256,29 +217,29 @@ def main():
             target_speed = max(0, min(target_speed, SPEED_MAX_RPM))
             current_speed = target_speed
 
-            raw_target = int(target_speed * raw_per_rpm)
+            raw_target = int(target_speed / VELOCITY_FACTOR)
             print(f"  Setting target: {target_speed} RPM (raw {raw_target})")
-            write_target_velocity(drive, raw_target)
+            sdo_write(drive, TARGET_VELOCITY, struct.pack('i', raw_target))
+            # New setpoint command
+            sdo_write(drive, CONTROLWORD, struct.pack('<H', 0x001F))
+            time.sleep(0.1)
+            sdo_write(drive, CONTROLWORD, struct.pack('<H', 0x000F))
             time.sleep(0.2)
 
             actual_vel_raw = read_actual_velocity(drive)
-            actual_rpm = actual_vel_raw / raw_per_rpm
+            actual_rpm = int(actual_vel_raw * VELOCITY_FACTOR)
             actual_trq = read_actual_torque(drive)
             sw = struct.unpack('<H', sdo_read(drive, STATUSWORD, 2))[0]
-            print(f"  Actual vel: {actual_rpm:.1f} RPM (raw {actual_vel_raw})  |  Torque: {actual_trq}  |  SW: 0x{sw:04X}")
+            print(f"  Actual vel: {actual_rpm} RPM (raw {actual_vel_raw})  |  Torque: {actual_trq}  |  SW: 0x{sw:04X}")
 
             if sw & SW_FAULT:
                 print("  FAULT detected!")
                 break
 
     finally:
-        print("\nShutting down…")
+        print("\nShutting down...")
         if 'drive' in locals() and drive is not None:
             try:
-                # Zero target velocity FIRST so we don't disable mid-motion and
-                # don't leave a stale setpoint for the next session.
-                sdo_write(drive, TARGET_VELOCITY, struct.pack('i', 0))
-                time.sleep(0.1)
                 sdo_write(drive, CONTROLWORD, struct.pack('<H', CW_DISABLE_VOLTAGE))
                 time.sleep(0.3)
                 print("  Servo OFF, brake engaged")

@@ -15,11 +15,6 @@ TORQUE_ACTUAL = 0x6077
 PROFILE_ACCEL = 0x6083
 PROFILE_DECEL = 0x6084
 MAX_MOTOR_SPEED = 0x6080
-GEAR_RATIO = 0x6091  # :1 numerator (motor revs), :2 denominator (shaft revs)
-
-# Encoder — Y7 motor code "D" = 23-bit absolute; use 17 for code "A"
-ENCODER_BITS = 23
-ENCODER_COUNTS_PER_REV = 1 << ENCODER_BITS
 
 # Brake objects
 BRAKE_OFF_DELAY = 0x2506
