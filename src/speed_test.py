@@ -1,5 +1,7 @@
 import pysoem
 import struct
+import sys
+import threading
 import time
 from config import (
     ECAT_ADAPTER_NAME,
@@ -20,6 +22,13 @@ from config import (
 # VELOCITY_FACTOR = 0.000011  # default scaling (raw per RPM = 1000)
 VELOCITY_FACTOR = 0.00000726  # default scaling (raw per RPM = 1000)
 
+# Serialize SDO access — the monitor thread and the main (input) thread
+# both talk to the same slave, and pysoem SDO calls are not reentrant.
+sdo_lock = threading.Lock()
+
+# Background torque/velocity monitor poll period.
+MONITOR_PERIOD_S = 0.2
+
 
 def find_adapter(desc_hint):
     adapters = pysoem.find_adapters()
@@ -33,13 +42,15 @@ def find_adapter(desc_hint):
 
 
 def sdo_write(drive, index, data):
-    ret = drive.sdo_write(index, 0, data)
+    with sdo_lock:
+        ret = drive.sdo_write(index, 0, data)
     if ret == 0:
         print(f"  [WARN] SDO write 0x{index:04X} returned 0")
 
 
 def sdo_read(drive, index, size):
-    return drive.sdo_read(index, 0, size)
+    with sdo_lock:
+        return drive.sdo_read(index, 0, size)
 
 
 def wait_for_sw(drive, mask, value, timeout=2.0):
@@ -123,7 +134,29 @@ def read_actual_velocity(drive):
 
 def read_actual_torque(drive):
     raw = sdo_read(drive, TORQUE_ACTUAL, 2)
-    return struct.unpack('H', raw)[0]
+    return struct.unpack('h', raw)[0]
+
+
+def monitor_loop(drive, stop_event):
+    """Background poll of velocity / torque / statusword while the drive runs.
+
+    Updates a single line in place via \\r. Trailing spaces pad over any
+    previous longer line; flush forces output without a newline.
+    """
+    while not stop_event.wait(MONITOR_PERIOD_S):
+        try:
+            vel_raw = read_actual_velocity(drive)
+            trq = read_actual_torque(drive)
+            sw = struct.unpack('<H', sdo_read(drive, STATUSWORD, 2))[0]
+        except Exception as e:
+            sys.stdout.write(f"\r  [MON] read error: {e}{' ' * 20}")
+            sys.stdout.flush()
+            continue
+        vel_rpm = int(vel_raw * VELOCITY_FACTOR)
+        sys.stdout.write(
+            f"\r  [MON] vel={vel_rpm:>5d} RPM  trq={trq:>5d}  sw=0x{sw:04X}   "
+        )
+        sys.stdout.flush()
 
 
 def main():
@@ -197,6 +230,13 @@ def main():
         print("  Enter speed in RPM (0-4500), Enter=Stop, Ctrl+C=Exit")
         print("-" * 60)
 
+        # Start background torque/velocity monitor — runs until stop_monitor is set.
+        stop_monitor = threading.Event()
+        monitor_thread = threading.Thread(
+            target=monitor_loop, args=(drive, stop_monitor), daemon=True
+        )
+        monitor_thread.start()
+
         current_speed = 0
         while True:
             try:
@@ -238,6 +278,9 @@ def main():
 
     finally:
         print("\nShutting down...")
+        if 'stop_monitor' in locals():
+            stop_monitor.set()
+            monitor_thread.join(timeout=1.0)
         if 'drive' in locals() and drive is not None:
             try:
                 sdo_write(drive, CONTROLWORD, struct.pack('<H', CW_DISABLE_VOLTAGE))
