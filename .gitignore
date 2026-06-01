@@ -4,3 +4,7 @@ __pycache__/
 .env
 venv/
 .venv/
+
+# Runtime calibration (machine-specific, captured on hardware)
+home_calib.json
+gravity_calib.json
