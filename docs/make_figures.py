@@ -149,7 +149,79 @@ def fig_observability():
     _save(fig, "fig_observability.png")
 
 
+# 7. Block diagram of the final adaptive control algorithm -----------------
+def fig_blockdiagram():
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+    fig, ax = plt.subplots(figsize=(12, 7.5))
+    ax.set_xlim(0, 16); ax.set_ylim(0, 11); ax.axis("off")
+
+    def box(x, y, w, h, text, fc="#eaf2fb", ec="#2c6cb0", fs=9):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.04,rounding_size=0.12",
+                                    fc=fc, ec=ec, lw=1.4))
+        ax.text(x+w/2, y+h/2, text, ha="center", va="center", fontsize=fs)
+        return (x, y, w, h)
+
+    def arrow(a, b, sa="E", sb="W", text="", color="#333", rad=0.0, fs=8):
+        pts = {"E": (a[0]+a[2], a[1]+a[3]/2), "W": (a[0], a[1]+a[3]/2),
+               "N": (a[0]+a[2]/2, a[1]+a[3]), "S": (a[0]+a[2]/2, a[1])}
+        pe = {"E": (b[0]+b[2], b[1]+b[3]/2), "W": (b[0], b[1]+b[3]/2),
+              "N": (b[0]+b[2]/2, b[1]+b[3]), "S": (b[0]+b[2]/2, b[1])}
+        p0, p1 = pts[sa], pe[sb]
+        ax.add_patch(FancyArrowPatch(p0, p1, arrowstyle="-|>", mutation_scale=13,
+                     lw=1.3, color=color, connectionstyle=f"arc3,rad={rad}"))
+        if text:
+            ax.text((p0[0]+p1[0])/2, (p0[1]+p1[1])/2+0.18, text, fontsize=fs,
+                    ha="center", color=color)
+
+    BL = "#2c6cb0"; GR = "#2e8b57"; OR = "#c0560a"
+    # --- Online real-time pipeline (top) ---
+    xz   = box(0.3, 9.0, 2.0, 1.0, "Цель\n(x, z)")
+    ik   = box(2.8, 9.0, 2.1, 1.0, "Обратная\nкинематика")
+    plan = box(5.4, 9.0, 2.4, 1.0, "Планировщик\nтраектории\nq, q̇, q̈")
+    summ = box(8.5, 9.0, 2.3, 1.0, "Σ   q_cmd =\nq_траект + δ", fc="#fff3e0", ec=OR)
+    jm   = box(11.5, 9.0, 2.0, 1.0, "joint_map\nугол→отсч.")
+    drv  = box(13.9, 9.0, 1.9, 1.0, "Привод Y7\nредуктор\nзвено", fc="#eee", ec="#555")
+    for a, b in [(xz, ik), (ik, plan), (plan, summ), (summ, jm), (jm, drv)]:
+        arrow(a, b)
+    arrow(summ, jm, "E", "W")
+    ax.text(12.5, 9.95, "0x607A", fontsize=7, ha="center", color="#555")
+
+    # --- Feedback from drive ---
+    fb = box(13.9, 6.6, 1.9, 1.0, "0x6064  q_факт\n0x6077  τ_изм", fc="#f3f3f3", ec="#555", fs=8)
+    arrow(drv, fb, "S", "N")
+
+    # --- Observer / adaptive compensation (middle) ---
+    dyn = box(9.3, 6.5, 3.0, 1.2,
+              "Динамическая модель\nτ̂ = G(q) + инерция +\nкориолис + трение", fc="#eafbea", ec=GR)
+    res = box(9.3, 4.6, 3.0, 0.95, "Остаток\nr = τ_изм − τ̂", fc="#eafbea", ec=GR)
+    cp  = box(9.3, 3.0, 3.0, 1.0, "Груз (скаляр)\nc_p = Σ Jᵢ rᵢ / Σ Jᵢ²", fc="#eafbea", ec=GR)
+    lpf = box(5.8, 3.0, 2.8, 1.0, "НЧ-фильтр c_p\n(устойчивость)", fc="#eafbea", ec=GR)
+    defl= box(5.8, 4.7, 2.8, 1.1, "Деформация\nδ = [G(q)+c_p·J(q)] / K_эф", fc="#fff3e0", ec=OR)
+
+    arrow(plan, dyn, "S", "W", rad=-0.15)            # q,q̇,q̈ -> model
+    arrow(fb, dyn, "W", "E", text="τ_изм")
+    arrow(dyn, res, "S", "N")
+    arrow(fb, res, "S", "E", rad=-0.3)
+    arrow(res, cp, "S", "N")
+    arrow(cp, lpf, "W", "E")
+    arrow(lpf, defl, "N", "S")
+    arrow(defl, summ, "N", "S", text="δ", color=OR)
+
+    # --- Offline calibration (bottom) ---
+    gcal = box(0.6, 0.6, 3.0, 1.0, "gravcal → G(q)\n(проба, де-фрикц.)", fc="#f0f0fb", ec=BL, fs=8)
+    scal = box(4.2, 0.6, 3.0, 1.0, "stiffcal → K_эф\n(груз + индикатор)", fc="#f0f0fb", ec=BL, fs=8)
+    dcal = box(7.8, 0.6, 3.2, 1.0, "dyncal → инерция/\nкориолис/трение", fc="#f0f0fb", ec=BL, fs=8)
+    arrow(gcal, defl, "N", "S", rad=0.25, color=BL)
+    arrow(scal, defl, "N", "S", rad=0.1, color=BL)
+    arrow(dcal, dyn, "N", "S", rad=0.1, color=BL)
+    ax.text(8.0, 2.15, "калибровка (офлайн)", fontsize=8, color=BL, style="italic")
+    ax.text(0.3, 10.6, "Рабочий цикл реального времени (4 мс)  •  адаптивная компенсация деформации",
+            fontsize=11, weight="bold")
+    _save(fig, "fig_blockdiagram.png")
+
+
 if __name__ == "__main__":
     fig_trapezoid(); fig_workspace(); fig_gravity()
     fig_deflection(); fig_friction(); fig_observability()
+    fig_blockdiagram()
     print("done ->", FIG)

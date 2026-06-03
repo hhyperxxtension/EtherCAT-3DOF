@@ -8,3 +8,9 @@ venv/
 # Runtime calibration (machine-specific, captured on hardware)
 home_calib.json
 gravity_calib.json
+gravity_samples.json
+stiffness_calib.json
+stiffness_samples.json
+stiffness_phys.json
+dynamics_calib.json
+dynamics_samples.json

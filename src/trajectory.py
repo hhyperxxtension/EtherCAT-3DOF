@@ -79,6 +79,33 @@ class _JointProfile:
             s = self.dist - 0.5 * a * td * td
         return self.q0 + self.sign * s
 
+    def vel(self, t):
+        """Joint velocity at time t [rad/s] (0 outside [0, T])."""
+        if t <= 0.0 or t >= self.T:
+            return 0.0
+        ta, T, a, v = self.t_a, self.T, self.a, self.v
+        if t < ta:
+            s = a * t
+        elif t < T - ta:
+            s = v
+        else:
+            s = a * (T - t)
+        return self.sign * s
+
+    def acc(self, t):
+        """Joint acceleration at time t [rad/s^2] (0 outside [0, T] and during
+        cruise; +/-a during accel/decel)."""
+        if t <= 0.0 or t >= self.T:
+            return 0.0
+        ta, T, a = self.t_a, self.T, self.a
+        if t < ta:
+            s = a
+        elif t < T - ta:
+            s = 0.0
+        else:
+            s = -a
+        return self.sign * s
+
 
 class Trajectory:
     """A planned PTP move. Sample it with `at(t)` or materialise the whole
@@ -94,6 +121,12 @@ class Trajectory:
         """Joint vector at time t [s] (tuple, length = #joints)."""
         return tuple(p.at(t) for p in self._profiles)
 
+    def at_full(self, t):
+        """(q, q̇, q̈) vectors at time t — analytic, no differentiation."""
+        return (tuple(p.at(t) for p in self._profiles),
+                tuple(p.vel(t) for p in self._profiles),
+                tuple(p.acc(t) for p in self._profiles))
+
     def samples(self, dt=EC_CYCLE_TIME):
         """Materialise the trajectory as a list of (t, q-vector) at step dt.
         Always includes t=0 and the exact endpoint at t=duration."""
@@ -103,6 +136,19 @@ class Trajectory:
             t = k * dt
             out.append((t, self.at(t)))
         out.append((self.duration, tuple(self.q_target)))
+        return out
+
+    def samples_full(self, dt=EC_CYCLE_TIME):
+        """Like samples() but each entry is (t, q, q̇, q̈) — for dynamic
+        identification / the inertial-torque term of the live observer."""
+        out = []
+        n = max(1, int(math.ceil(self.duration / dt)))
+        for k in range(n):
+            t = k * dt
+            q, qd, qdd = self.at_full(t)
+            out.append((t, q, qd, qdd))
+        nz = tuple(0.0 for _ in self.q_target)
+        out.append((self.duration, tuple(self.q_target), nz, nz))
         return out
 
 

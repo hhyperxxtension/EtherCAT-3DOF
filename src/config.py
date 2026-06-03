@@ -92,8 +92,8 @@ DEFAULT_DECEL_RPM = 3000
 # Link lengths in MILLIMETRES: (L1 shoulder->elbow, L2 elbow->end effector).
 # All Cartesian quantities (targets, workspace, FK/IK output) are in mm.
 # Measured: axis1->axis2 = 200 mm, axis2->end-effector = 281 mm.
-# LINK_LENGTHS = (200.0, 281.0)
-LINK_LENGTHS = (200.0, 351.0)
+LINK_LENGTHS = (200.0, 281.0)
+# LINK_LENGTHS = (200.0, 351.0)
 
 
 # Which IK branch to use: "up" (elbow above the shoulder-EE line) or "down".
@@ -102,10 +102,11 @@ LINK_LENGTHS = (200.0, 351.0)
 # table). Toggle at runtime with the `elbow` command if needed.
 ELBOW_CONFIG = "down"
 
-# Software joint limits (radians), (min, max) per joint. TODO: from mechanics.
+# Software joint limits (radians), (min, max) per joint.
 JOINT_LIMITS = (
-    (-2.094, 2.094),   # q0 shoulder: ±120°
-    (-2.618, 2.618),   # q1 elbow:    ±150°
+    (-0.017453, 3.159046),   # q0 shoulder: -1 deg .. +181 deg (down side blocked
+                             #   to keep clear of the table; up/over side open)
+    (-1.919862, 1.919862),   # q1 elbow:    +/-110 deg (arm self-collides past this)
 )
 
 # ── Joint ↔ motor mapping ────────────────────────────────────────────────
@@ -144,5 +145,59 @@ JOINT_ZERO_RAD = (0.0, 0.0)            # joint angle at home; set by teaching ho
 
 # ── Motion defaults (joint space) ────────────────────────────────────────
 # Max joint speed / acceleration used by the trapezoidal PTP planner.
-JOINT_VEL_MAX = 1.0                    # rad/s  TODO: tune
-JOINT_ACC_MAX = 2.0                    # rad/s² TODO: tune
+JOINT_VEL_MAX = 0.2                    # rad/s  TODO: tune
+JOINT_ACC_MAX = 1.0                    # rad/s² TODO: tune
+
+# ── Torque probe (deflection-compensation calibration) ───────────────────
+# Bidirectional slow sweep used to read de-frictioned load torque + friction
+# per joint (see controller.probe_*). Defaults; overridable per call.
+PROBE_SWEEP_DEG = 2.0                  # +/- joint angle of the sweep, degrees
+PROBE_SPEED_DPS = 1.0                  # cruise speed of the sweep, deg/s
+
+# Cartesian safety floor (mm): tip AND elbow z must stay >= this during the
+# autonomous gravity-calibration sweep. The table sits ~20 mm below z=0 (the
+# home plane), so 0 keeps clearance. Secondary to the q0 joint limit.
+# ── Stiffness calibration (deflection comp) ──────────────────────────────
+STIFFCAL_LOAD_KG = 2.25      # known tip load (bearing) used for K_eff cal
+STIFFCAL_N = 4               # number of auto-selected poses (>= n_joints)
+STIFFCAL_G_HEADROOM = 150.0  # skip poses whose arm-only |G| (per-mille) exceeds
+                             # this, so probing WITH the load stays under the cap
+# stiffcal probe sweep is kept TINY so the dial indicator (small range) stays in
+# range during the torque probe: 0.1 deg at the joint = ~1 mm at the tip (vs ~19
+# mm for the 2 deg default). Slow cruise keeps enough samples for de-frictioning.
+STIFFCAL_SWEEP_DEG = 0.1
+STIFFCAL_SPEED_DPS = 0.5
+
+# Two-experiment stiffness calibration (robust replacement for the noisy
+# tiny-sweep stiffcal):
+#  - stiffdroop: STATIC tip droop under the load at two poses (NO sweep) ->
+#    physical stiffness Kp [N*mm/rad]. Pose (0,90) has J1=0 (tip directly above
+#    the elbow) so it ISOLATES the shoulder; (0,0) then gives the elbow.
+#  - stiffscale: de-frictioned probe WITH and WITHOUT the load (proper sweep,
+#    indicator removed) -> per-mille-per-torque scale s_i -> K_i = s_i*Kp_i.
+G_ACCEL = 9.81                          # m/s^2 (only sets physical Kp; cancels in K)
+STIFF_DROOP_POSES_DEG = ((0.0, 0.0), (0.0, 90.0))
+STIFF_SCALE_POSES_DEG = ((50.0, -30.0), (40.0, 20.0))
+
+# ── Dynamic identification (dyncal) ──────────────────────────────────────
+# Excitation moves between safe poses at SEVERAL accelerations to identify the
+# inertia/Coriolis/friction terms (need varying q̈ on both joints). Kept modest
+# for safety; raise accels for richer inertia excitation.
+DYNCAL_GRID_N = 3                      # poses-per-axis of the traversal set
+DYNCAL_VMAX = 0.6                      # rad/s cruise for excitation moves
+DYNCAL_ACCELS = (0.5, 1.0, 2.0)        # rad/s^2 accelerations to sweep
+
+# ── Online payload observer (adaptive compensation) ──────────────────────
+# Low-pass on the estimated payload scalar c_p (per cycle): alpha close to 1 =
+# heavier filtering = more stable but slower to track. tau ~= dt/(1-alpha).
+OBS_LP_ALPHA = 0.97                    # ~0.13 s time constant at 4 ms
+OBS_DELTA_MAX_RAD = 0.20               # hard clamp on the per-joint correction
+
+Z_FLOOR_MM = 0.0
+# Tolerance below the floor that is still accepted (mm). The home pose sits
+# exactly at z=0, so a strict check trips on the very first path sample; ~20 mm
+# of table clearance means a few mm of slack is safe and avoids that boundary
+# false-positive.
+Z_FLOOR_TOL_MM = 5.0
+GRAVCAL_GRID_N = 5                     # default grid points per joint axis
+GRAVCAL_APPROACH_DPS = 17.0            # ~0.3 rad/s reduced approach speed

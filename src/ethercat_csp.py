@@ -129,6 +129,9 @@ class CSPBus:
         self._target = []   # counts currently commanded on the bus
         self._goal = []     # counts the cycle thread is walking toward (jog)
         self._queue = collections.deque()  # pre-planned count-vectors to play
+        self._corrector = None              # optional per-cycle live corrector
+        self._logging = False               # record torque per played cycle?
+        self._torque_log = []               # [[trq per drive], ...] while playing
         self._status = []   # last parsed TxPDO per drive
         self._faulted = []
 
@@ -271,16 +274,26 @@ class CSPBus:
         while not self._stop.is_set():
             with self._lock:
                 target = list(self._target)
-                if self._queue:
+                playing = bool(self._queue)
+                if playing:
                     # Playing a planned trajectory: follow its setpoints, with
                     # only the hard safety cap. Keep goal synced so we hold the
                     # last point once the queue drains.
                     desired = self._queue.popleft()
+                    # Optional live corrector adds a per-cycle offset (adaptive
+                    # deflection comp) using the PREVIOUS cycle's torque.
+                    if self._corrector is not None:
+                        try:
+                            off = self._corrector(self._status)
+                            desired = [desired[i] + off[i] for i in range(self.n)]
+                        except Exception:
+                            pass
                     self._goal = list(desired)
                     step = self.hard_max_step
                 else:
                     desired = list(self._goal)   # jog / hold
                     step = self.max_step
+                logging = self._logging
             for i in range(self.n):
                 delta = desired[i] - target[i]
                 if delta > step:
@@ -292,6 +305,8 @@ class CSPBus:
             with self._lock:
                 self._target = target
                 self._status = snap
+                if playing and logging:
+                    self._torque_log.append([s['trq'] for s in snap])
                 for i in range(self.n):
                     if (snap[i]['sw'] & 0x7F) != SW_OPERATION_ENABLED:
                         self._faulted[i] = True
@@ -321,14 +336,31 @@ class CSPBus:
             cur = self._status[idx]['pos']
             self._goal[idx] = cur + int(delta)
 
-    def play_trajectory(self, count_vectors):
+    def play_trajectory(self, count_vectors, log_torque=False, corrector=None):
         """Queue a list of per-drive count-vectors for the RT thread to play
-        out, one per cycle. Replaces any trajectory currently in flight."""
+        out, one per cycle. Replaces any trajectory currently in flight. If
+        log_torque, the torque (0x6077) of every played cycle is recorded and
+        retrievable via torque_log() — one entry per played cycle, aligned with
+        the supplied vectors (for dynamic identification).
+
+        `corrector`, if given, is called every played cycle as
+        corrector(status) -> list of per-joint count offsets, added to that
+        cycle's setpoint (live adaptive compensation). It sees the previous
+        cycle's status (torque), so there is a one-cycle lag."""
         for v in count_vectors:
             if len(v) != self.n:
                 raise ValueError(f"each vector needs {self.n} counts")
         with self._lock:
             self._queue = collections.deque(count_vectors)
+            self._corrector = corrector
+            self._logging = log_torque
+            if log_torque:
+                self._torque_log = []
+
+    def torque_log(self):
+        """Copy of the per-cycle torque log from the last logged trajectory."""
+        with self._lock:
+            return [list(row) for row in self._torque_log]
 
     def is_busy(self):
         """True while a queued trajectory is still being played."""
@@ -339,6 +371,7 @@ class CSPBus:
         """Stop motion now: drop any queued trajectory and hold current pos."""
         with self._lock:
             self._queue.clear()
+            self._corrector = None
             for i in range(self.n):
                 self._goal[i] = self._status[i]['pos']
 

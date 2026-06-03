@@ -95,13 +95,15 @@ class GravityModel:
         return rms
 
     # ── persistence ─────────────────────────────────────────────────────
-    def save(self, path=CALIB_FILE):
+    def save(self, path=None):
+        path = path or CALIB_FILE
         with open(path, "w") as f:
             json.dump({"coeffs": self.coeffs, "n_joints": N_JOINTS}, f, indent=2)
 
     @classmethod
-    def load(cls, path=CALIB_FILE):
+    def load(cls, path=None):
         """Load a persisted model; returns None if absent/invalid."""
+        path = path or CALIB_FILE
         if not os.path.exists(path):
             return None
         try:

@@ -101,3 +101,21 @@ def workspace_bounds(links=LINK_LENGTHS):
     """Inner/outer radii of the reachable annulus (r_min, r_max)."""
     l1, l2 = links
     return (abs(l1 - l2), l1 + l2)
+
+
+def jacobian(q, links=LINK_LENGTHS):
+    """2x2 tip Jacobian d(x, z)/d(q0, q1) at pose q (same units as links)."""
+    q0, q1 = q
+    l1, l2 = links
+    s0, c0 = math.sin(q0), math.cos(q0)
+    s01, c01 = math.sin(q0 + q1), math.cos(q0 + q1)
+    return ((-l1 * s0 - l2 * s01, -l2 * s01),
+            (l1 * c0 + l2 * c01, l2 * c01))
+
+
+def tip_offset(q, dq, links=LINK_LENGTHS):
+    """Tip Cartesian displacement (dx, dz) for a small joint change dq, via the
+    Jacobian. Used to report a joint-space deflection correction in tip mm."""
+    j = jacobian(q, links)
+    return (j[0][0] * dq[0] + j[0][1] * dq[1],
+            j[1][0] * dq[0] + j[1][1] * dq[1])
